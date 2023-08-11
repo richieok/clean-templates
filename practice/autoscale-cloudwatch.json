@@ -1,0 +1,139 @@
+{
+    "Parameters": {
+        "LatestAmiId": {
+            "Description": "AMI for EC2",
+            "Type": "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>",
+            "Default": "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
+        },
+        "InstanceType": {
+            "Description": "Amazon EC2 instance type for the instances",
+            "Type": "String",
+            "AllowedValues": [
+                "t2.micro",
+                "t2.small",
+                "t2.medium"
+            ],
+            "Default": "t2.micro"
+        },
+        "NetworkStackName": {
+            "Description": "The name of the stack to initialize the instance",
+            "Type": "String"
+        },
+        "snsTopicForAutoScalingGroup": {
+            "Description": "An existing SNS Topic to notify",
+            "Type": "String"
+        }
+    },
+    "Resources": {
+        "myLaunchTemplate": {
+            "Type": "AWS::EC2::LaunchTemplate",
+            "Properties": {
+                "LaunchTemplateName": {
+                    "Fn::Sub": "${AWS::StackName}-launch-template"
+                },
+                "LaunchTemplateData": {
+                    "ImageId": {
+                        "Ref": "LatestAmiId"
+                    },
+                    "InstanceType": {
+                        "Ref": "InstanceType"
+                    },
+                    "SecurityGroupIds": [
+                        {
+                            "Fn::ImportValue": {
+                                "Fn::Sub": "${NetworkStackName}-SecurityGroupID"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        "myASG": {
+            "Type": "AWS::AutoScaling::AutoScalingGroup",
+            "Properties": {
+                "LaunchTemplate": {
+                    "LaunchTemplateId": {
+                        "Ref": "myLaunchTemplate"
+                    },
+                    "Version": {
+                        "Fn::GetAtt": [
+                            "myLaunchTemplate",
+                            "LatestVersionNumber"
+                        ]
+                    }
+                },
+                "MaxSize": "3",
+                "MinSize": "0",
+                "DesiredCapacity": "1",
+                "VPCZoneIdentifier": [
+                    {
+                        "Fn::ImportValue": {
+                            "Fn::Sub": "${NetworkStackName}-PublicSubnet1"
+                        }
+                    },
+                    {
+                        "Fn::ImportValue": {
+                            "Fn::Sub": "${NetworkStackName}-PublicSubnet2"
+                        }
+                    }
+                ],
+                "NotificationConfigurations": [
+                    {
+                        "TopicARN": {
+                            "Ref": "snsTopicForAutoScalingGroup"
+                        },
+                        "NotificationTypes": [
+                            "autoscaling:EC2_INSTANCE_LAUNCH",
+                            "autoscaling:EC2_INSTANCE_LAUNCH_ERROR",
+                            "autoscaling:EC2_INSTANCE_TERMINATE",
+                            "autoscaling:EC2_INSTANCE_TERMINATE_ERROR",
+                            "autoscaling:TEST_NOTIFICATION"
+                        ]
+                    }
+                ]
+            }
+        },
+        "ASGScalingPolicyHigh": {
+            "Type": "AWS::AutoScaling::ScalingPolicy",
+            "Properties": {
+                "AutoScalingGroupName": {
+                    "Ref": "myASG"
+                },
+                "PolicyType": "StepScaling",
+                "AdjustmentType": "ChangeInCapacity",
+                "StepAdjustments": [
+                    {
+                        "MetricIntervalLowerBound": 0,
+                        "ScalingAdjustment": 1
+                    }
+                ]
+            }
+        },
+        "CPUAlarmHigh": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "Properties": {
+                "EvaluationPeriods": "2",
+                "Statistic": "Average",
+                "Threshold": "80",
+                "AlarmDescription": "Scale out if CPU > 80% for 2 minutes",
+                "Period": "60",
+                "AlarmActions": [
+                    {
+                        "Ref": "ASGScalingPolicyHigh"
+                    }
+                ],
+                "Namespace": "AWS/EC2",
+                "Dimensions": [
+                    {
+                        "Name": "AutoScalingGroupName",
+                        "Value": {
+                            "Ref": "myASG"
+                        }
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanThreshold",
+                "MetricName": "CPUUtilization"
+            }
+        }
+    }
+}
